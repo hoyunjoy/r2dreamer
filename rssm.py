@@ -6,6 +6,8 @@ import distributions as dists
 from networks import BlockLinear, LambdaLayer
 from tools import rpad, weight_init_
 
+from mamba_ssm import Mamba2
+
 
 class Deter(nn.Module):
     def __init__(self, deter, stoch, act_dim, hidden, blocks, dynlayers, act="SiLU"):
@@ -73,6 +75,58 @@ class Deter(nn.Module):
         update = torch.sigmoid(update - 1)
         # (B, D)
         return update * cand + (1 - update) * deter
+
+# 수정 완료
+class MambaRSSM(nn.Module):
+    def __init__(self, embed_dim, act_dim, stoch_dim=32, classes=32, d_model=512):
+        super().__init__()
+        self.stoch_dim = stoch_dim
+        self.classes = classes
+        self.d_model = d_model
+        
+        # 이전 잠재 상태(stoch_dim * classes)와 행동(act_dim)을 결합하여 Mamba의 입력으로 변환
+        in_dim = (stoch_dim * classes) + act_dim
+        self.in_proj = nn.Linear(in_dim, d_model)
+        
+        # 핵심: GRU를 대체하는 Mamba-2 블록
+        self.mamba = Mamba2(
+            d_model=d_model,
+            d_state=64,  # 상태 압축 차원
+            d_conv=4,
+            expand=2
+        )
+        
+        # Prior(전이 모델) 및 Posterior(표현 모델)를 위한 출력 프로젝션
+        self.prior_net = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.SiLU(),
+            nn.Linear(d_model, stoch_dim * classes)
+        )
+        
+        self.post_net = nn.Sequential(
+            nn.Linear(d_model + embed_dim, d_model),
+            nn.SiLU(),
+            nn.Linear(d_model, stoch_dim * classes)
+        )
+
+    def forward_parallel(self, embed, action, prev_stoch):
+        # embed: (B, T, embed_dim), action: (B, T, act_dim)
+        B, T, _ = action.shape
+        
+        # t-1 시점의 상태와 t 시점의 행동을 결합하기 위해 시퀀스를 한 칸 밀어줍니다.
+        prev_stoch_shifted = torch.cat([prev_stoch[:, :1], prev_stoch[:, :-1]], dim=1)
+        prev_stoch_flat = prev_stoch_shifted.reshape(B, T, -1)
+        
+        # Mamba-2를 통해 시퀀스 전체를 한 번에(병렬로) 처리
+        mamba_in = self.in_proj(torch.cat([prev_stoch_flat, action], dim=-1))
+        det_state = self.mamba(mamba_in) # det_state: (B, T, d_model)
+        
+        # 로짓 계산
+        prior_logits = self.prior_net(det_state)
+        post_logits = self.post_net(torch.cat([det_state, embed], dim=-1))
+        
+        # prior_logits와 post_logits는 (B, T, stoch_dim * classes) 형태입니다.
+        return prior_logits, post_logits, det_state
 
 
 class RSSM(nn.Module):

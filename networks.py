@@ -404,3 +404,34 @@ class ReturnEMA(nn.Module):
         scale = torch.clip(self.ema_vals[1] - self.ema_vals[0], min=1.0)
         offset = self.ema_vals[0]
         return offset.detach(), scale.detach()
+
+# 수정 완료
+class ACCPCPredictor(nn.Module):
+    def __init__(self, d_model, act_dim, k_steps=5):
+        super().__init__()
+        self.k_steps = k_steps
+        self.action_proj = nn.Linear(act_dim, d_model)
+        
+        self.predictor = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.LayerNorm(d_model),
+            nn.SiLU(),
+            nn.Linear(d_model, d_model)
+        )
+        # 온도 매개변수 (학습 가능하도록 설정)
+        self.temperature = nn.Parameter(torch.tensor(0.1).log())
+
+    def forward(self, det_state, future_actions):
+        # det_state: (B, T, d_model)
+        # future_actions: (B, T, k_steps, act_dim)
+        B, T, _, _ = future_actions.shape
+        preds =
+        
+        curr_state = det_state
+        for k in range(self.k_steps):
+            act_k = self.action_proj(future_actions[:, :, k, :])
+            curr_state = self.predictor(torch.cat([curr_state, act_k], dim=-1))
+            preds.append(curr_state)
+            
+        # (B, T, k_steps, d_model) 형태로 반환
+        return torch.stack(preds, dim=2)

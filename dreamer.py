@@ -719,3 +719,37 @@ class Dreamer(nn.Module):
         x_translated = F.grid_sample(x_padded, grid, mode=mode, padding_mode="zeros", align_corners=False)
 
         return x_translated.reshape(B, T, C, H, W)
+
+# 수정 완료
+def compute_ac_cpc_loss(predictions, targets, temp_param):
+    """
+    predictions: (B, T, k, d_model) - ACCPCPredictor의 출력
+    targets: (B, T, k, d_model) - 인코더를 통과한 실제 미래 관측치
+    """
+    B, T, K, D = predictions.shape
+    
+    # 코사인 유사도를 위해 벡터 정규화
+    preds = F.normalize(predictions, dim=-1)
+    targs = F.normalize(targets, dim=-1)
+    temp = torch.exp(temp_param)
+    
+    total_loss = 0.0
+    for k in range(K):
+        # 배치(B)와 시간(T) 축을 합쳐서 대조 학습을 수행
+        p_k = preds[:, :, k, :].reshape(B * T, D)
+        t_k = targs[:, :, k, :].reshape(B * T, D)
+        
+        # (B*T, D) 행렬과 (D, B*T) 행렬을 곱하여 모든 긍정/부정 샘플 간의 유사도 행렬 생성
+        logits = torch.matmul(p_k, t_k.T) / temp
+        
+        # 대각선 성분이 긍정적 샘플(정답)이 됨
+        labels = torch.arange(B * T, device=preds.device)
+        loss = F.cross_entropy(logits, labels)
+        total_loss += loss
+        
+    return total_loss / K
+
+# 사용 예시 (dreamer.py의 _world_model_loss 내부):
+# cpc_preds = self.ac_cpc_predictor(det_state, future_actions)
+# cpc_loss = compute_ac_cpc_loss(cpc_preds, future_targets, self.ac_cpc_predictor.temperature)
+# total_loss = dyn_loss + rep_loss + cpc_loss + reward_loss

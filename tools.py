@@ -4,6 +4,7 @@ import json
 import os
 import random
 import time
+import math
 
 import numpy as np
 import torch
@@ -469,3 +470,51 @@ def print_param_stats(model):
                 fmt(rms_val),
             )
         )
+
+# 수정 완료
+def kogge_stone_parallel_scan(inputs, operator):
+    """
+    O(log H) 시간 복잡도를 가지는 트리 기반 병렬 스캐너입니다.
+    """
+    Length = inputs.shape[1] # 시간 축(T)의 길이
+    Times = math.ceil(math.log2(Length))
+    
+    for i in range(Times):
+        interval = int(2 ** i)
+        # shift 연산을 통해 이진 트리 구조로 텐서끼리 병렬 연산 수행
+        outputs = operator(
+            [inp[:, :-interval] for inp in inputs],
+            [inp[:, interval:] for inp in inputs]
+        )
+        inputs = [
+            torch.cat([inp[:, :interval], out], dim=1)
+            for inp, out in zip(inputs, outputs)
+        ]
+    return inputs
+
+def parallel_lambda_return(reward, value, next_value, p_cont, gamma, lam):
+    """
+    reward, value, next_value, p_cont 형태: (B, H)
+    """
+    # 1. 1차 선형 점화식의 가중치(W)와 상수항(u) 정의
+    W = gamma * p_cont * lam
+    u = reward + gamma * p_cont * (1 - lam) * next_value
+    
+    # 2. 미래 가치를 현재로 당겨오는 역방향(Reverse) 연산이므로 텐서를 뒤집습니다.
+    W_flip = torch.flip(W, dims=[1])
+    u_flip = torch.flip(u, dims=[1])
+    
+    # 3. 결합 법칙을 만족하는 이항 연산자 정의
+    def operator(a, b):
+        W_a, u_a = a
+        W_b, u_b = b
+        return W_a * W_b, W_a * u_b + u_a
+
+    # 4. 병렬 스캔 실행
+    W_res, u_res = kogge_stone_parallel_scan(, operator)
+    
+    # 5. 시간 순서를 원래대로 복구
+    V_flip = u_res 
+    V = torch.flip(V_flip, dims=[1])
+    
+    return V
